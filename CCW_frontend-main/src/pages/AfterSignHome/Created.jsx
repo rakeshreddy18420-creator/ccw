@@ -1,12 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Header from "../../component/Header";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import api from "../../utils/axiosConfig";
 import { useUser } from "../../contexts/UserContext";
 
 export default function Created() {
   const navigate = useNavigate();
   const { userData } = useUser();
+  const { jobId } = useParams();
 
   // =========================================================
   // STATE MANAGEMENT
@@ -14,22 +15,209 @@ export default function Created() {
   const [files, setFiles] = useState([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-
   const [budgetType, setBudgetType] = useState("Hourly");
   const [budget, setBudget] = useState({
     from: "",
     to: "",
   });
-
-  // State for Estimate Level section
   const [estimateLevel, setEstimateLevel] = useState("");
-
-  // State for Estimate Time section
   const [estimateTime, setEstimateTime] = useState("");
   const [durationUnit, setDurationUnit] = useState("");
-
   const [skills, setSkills] = useState([]);
   const [currentSkill, setCurrentSkill] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [jobStatus, setJobStatus] = useState(null); // Track if it's a draft or posted job
+
+  // =========================================================
+  // FETCH JOB DATA IF IN EDIT MODE - FIXED TO HANDLE BOTH DRAFT AND POSTED
+  // =========================================================
+  useEffect(() => {
+    const fetchJobForEdit = async () => {
+      if (jobId) {
+        setLoading(true);
+        try {
+          // First get the current user to get employer_id
+          const me = await api.get("/auth/me");
+          const employerId = me.data.id;
+
+          // Try to fetch from drafts first (since we're coming from SavedDraft page)
+          let jobData = null;
+          let status = null;
+
+          try {
+            // Try to fetch from drafts
+            const draftResponse = await api.get(`/jobs/my-jobs/${employerId}?status=draft`);
+            const draftJobs = draftResponse.data.jobs || [];
+            jobData = draftJobs.find(job => job.id === parseInt(jobId));
+            if (jobData) status = "draft";
+          } catch (error) {
+            console.log("No drafts found or error fetching drafts");
+          }
+
+          // If not found in drafts, try posted jobs
+          if (!jobData) {
+            try {
+              const postedResponse = await api.get(`/jobs/my-jobs/${employerId}?status=posted`);
+              const postedJobs = postedResponse.data.jobs || [];
+              jobData = postedJobs.find(job => job.id === parseInt(jobId));
+              if (jobData) status = "posted";
+            } catch (error) {
+              console.log("No posted jobs found or error fetching posted jobs");
+            }
+          }
+
+          // If still not found, try a direct fetch (if your API supports it)
+          if (!jobData) {
+            try {
+              const directResponse = await api.get(`/jobs/${jobId}`);
+              jobData = directResponse.data;
+              if (jobData) {
+                // Determine status from the job data
+                status = jobData.status || "unknown";
+              }
+            } catch (error) {
+              console.log("Direct job fetch failed");
+            }
+          }
+
+          if (!jobData) {
+            alert("Job not found");
+            setLoading(false);
+            return;
+          }
+
+          console.log("Fetched job data:", jobData);
+          setJobStatus(status);
+
+          // Populate all form fields with the fetched data
+          setTitle(jobData.title || "");
+          setDescription(jobData.description || "");
+
+          // Parse skills
+          if (jobData.skills) {
+            if (Array.isArray(jobData.skills)) {
+              setSkills(jobData.skills);
+            } else if (typeof jobData.skills === 'string') {
+              setSkills(jobData.skills.split(',').map(s => s.trim()).filter(s => s));
+            }
+          }
+
+          // Set budget type (convert backend format to your component format)
+          if (jobData.budget_type) {
+            setBudgetType(jobData.budget_type === "fixed" ? "Fixed" : "Hourly");
+          }
+
+          // Set budget values
+          setBudget({
+            from: jobData.budget_from || "",
+            to: jobData.budget_to || "",
+          });
+
+          // Set expertise level (capitalize first letter)
+          if (jobData.expertise_level) {
+            const level = jobData.expertise_level.charAt(0).toUpperCase() + 
+                         jobData.expertise_level.slice(1);
+            setEstimateLevel(level);
+          }
+
+          // Parse duration if available
+          if (jobData.duration) {
+            const durationParts = jobData.duration.split(' ');
+            if (durationParts.length >= 2) {
+              setDurationUnit(durationParts[1]); // 'days', 'weeks', 'months'
+            }
+          }
+
+          // If your backend stores project size, map it here
+          if (jobData.project_size) {
+            setEstimateTime(jobData.project_size);
+          }
+
+        } catch (error) {
+          console.error("Error fetching job for edit:", error);
+          alert("Failed to load job data for editing. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchJobForEdit();
+  }, [jobId]);
+
+  // =========================================================
+  // SUBMIT LOGIC - FIXED UPDATE ENDPOINT
+  // =========================================================
+  const submitJob = async (status) => {
+    // Form Validation
+    if (!title.trim()) { alert("Job title is required"); return; }
+    if (!description.trim()) { alert("Description is required"); return; }
+    if (!skills.length) { alert("Please add at least one skill"); return; }
+    if (!estimateLevel) { alert("Please select expertise level"); return; }
+    if (!durationUnit) { alert("Please select project duration"); return; }
+    if (!budget.from) { alert("Budget from is required"); return; }
+    if (budgetType === "Hourly" && !budget.to) { alert("Budget to is required for hourly jobs"); return; }
+
+    if (!userData?.id) {
+      alert("User not authenticated");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+
+      // Text Fields
+      formData.append("title", title);
+      formData.append("description", description);
+      formData.append("skills", skills.join(","));
+      formData.append("duration", `1 ${durationUnit}`);
+      formData.append("expertise_level", estimateLevel.trim().toLowerCase());
+      formData.append("budget_type", budgetType === "Fixed" ? "fixed" : "hourly");
+
+      const budgetFrom = parseFloat(budget.from);
+      const budgetTo = budgetType === "Fixed" ? budgetFrom : parseFloat(budget.to);
+
+      formData.append("budget_from", String(budgetFrom));
+      formData.append("budget_to", String(budgetTo));
+      formData.append("status", status === "posted" ? "posted" : "draft");
+
+      // File handling
+      if (files.length > 0) {
+        files.forEach((file) => {
+          if (file.size > 0) {
+            formData.append("attachments", file);
+          }
+        });
+      }
+
+      // Use correct endpoints based on your backend routes
+      if (jobId) {
+        // UPDATE existing job - using the correct PUT endpoint
+        await api.put(`/jobs/edit/${jobId}`, formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        alert("Job updated successfully!");
+      } else {
+        // CREATE new job
+        await api.post(`/jobs/create/${userData.id}`, formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        alert("Job created successfully!");
+      }
+
+      // Navigate based on status and whether it was an edit or new job
+      if (status === "posted") {
+        navigate("/job-created");
+      } else {
+        navigate("/saved-draft");
+      }
+
+    } catch (err) {
+      console.error("Job submission failed", err);
+      const errorMsg = err.response?.data?.detail || "Failed to submit job";
+      alert(typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg));
+    }
+  };
 
   // =========================================================
   // HANDLERS – SKILLS & FILES
@@ -67,83 +255,53 @@ export default function Created() {
     setSkills(skills.filter((s) => s !== skillToRemove));
   };
 
+  // Show loading state
+  if (loading) {
+    return (
+      <section className="w-full min-h-screen bg-white flex justify-center items-center py-[100px] px-4">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-[#51218F] border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-[#51218F] font-semibold">Loading job data...</p>
+        </div>
+      </section>
+    );
+  }
+
   // =========================================================
-  // SUBMIT LOGIC – INTEGRATED WITH BACKEND
+  // RETURN JSX - EXACTLY THE SAME DESIGN
   // =========================================================
-  const submitJob = async (status) => {
-    // Form Validation
-    if (!title.trim()) { alert("Job title is required"); return; }
-    if (!description.trim()) { alert("Description is required"); return; }
-    if (!skills.length) { alert("Please add at least one skill"); return; }
-    if (!estimateLevel) { alert("Please select expertise level"); return; }
-    if (!durationUnit) { alert("Please select project duration"); return; }
-    if (!budget.from) { alert("Budget from is required"); return; }
-    if (budgetType === "Hourly" && !budget.to) { alert("Budget to is required for hourly jobs"); return; }
-
-    if (!userData?.id) {
-      alert("User not authenticated");
-      return;
-    }
-
-    try {
-      const formData = new FormData();
-
-      // Text Fields
-      formData.append("title", title);
-      formData.append("description", description);
-
-      // Skills mapped to comma-separated string for FastAPI split(",")
-      formData.append("skills", skills.join(","));
-
-      // Duration: format "1 weeks" for Backend regex parsing
-      formData.append("duration", `1 ${durationUnit}`);
-
-      // Taxonomy & Formatting
-      formData.append("expertise_level", estimateLevel.trim().toLowerCase());
-      formData.append("budget_type", budgetType === "Fixed" ? "fixed" : "hourly");
-
-      // Budget logic
-      const budgetFrom = parseFloat(budget.from);
-      const budgetTo = budgetType === "Fixed" ? budgetFrom : parseFloat(budget.to);
-
-      formData.append("budget_from", String(budgetFrom));
-      formData.append("budget_to", String(budgetTo));
-      formData.append("status", status === "posted" ? "posted" : "draft");
-
-      // File handling
-      if (files.length > 0) {
-        files.forEach((file) => {
-          if (file.size > 0) {
-            formData.append("attachments", file);
-          }
-        });
-      }
-
-      // API POST
-      await api.post(`/jobs/create/${userData.id}`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-
-      navigate(status === "posted" ? "/job-created" : "/saved-draft");
-
-    } catch (err) {
-      console.error("Job creation failed", err);
-      const errorMsg = err.response?.data?.detail || "Failed to create job";
-      alert(typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg));
-    }
-  };
-
   return (
     <section className="w-full min-h-screen bg-white flex justify-center py-[100px] px-4">
       <div className="relative w-full max-w-[1163px] bg-white rounded-[10px] shadow-[0px_4px_45px_rgba(0,0,0,0.12)] p-6 md:p-[40px] flex flex-col h-fit">
 
         {/* Back Button */}
-        <div onClick={() => navigate("/home")} className="mb-6 font-['Montserrat'] font-medium text-[14px] leading-none tracking-normal text-black flex items-center cursor-pointer">
+        <div 
+          onClick={() => {
+            if (jobId) {
+              // If we're editing, go back to the appropriate page based on job status
+              if (jobStatus === "draft") {
+                navigate("/saved-draft");
+              } else {
+                navigate("/job-created");
+              }
+            } else {
+              navigate("/home");
+            }
+          }} 
+          className="mb-6 font-['Montserrat'] font-medium text-[14px] leading-none tracking-normal text-black flex items-center cursor-pointer"
+        >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" className="w-4 h-4 mr-1" fill="none">
             <path d="M9.5 3L4.5 8L9.5 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span>Back</span>
         </div>
+
+        {/* Edit Mode Indicator */}
+        {jobId && (
+          <div className="text-[#51218F] text-sm font-semibold mb-2">
+            Editing {jobStatus === "draft" ? "Draft" : "Job"}
+          </div>
+        )}
 
         {/* Top Divider */}
         <div className="w-full h-[1px] bg-[rgba(0,0,0,0.1)] "></div>
@@ -320,8 +478,12 @@ export default function Created() {
 
             {/* Mobile View Action Buttons */}
             <div className="mt-6 flex gap-4 lg:hidden">
-              <button onClick={() => submitJob("posted")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] bg-gradient-to-r from-[#51218F] to-black text-white font-['Montserrat'] font-bold text-[14px] shadow-md hover:opacity-90">Post job now</button>
-              <button onClick={() => submitJob("draft")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] !border !border-[rgba(38,50,56,1)] bg-white text-[rgba(38,50,56,1)] font-['Montserrat'] font-bold text-[14px] hover:bg-gray-50">Save as draft</button>
+              <button onClick={() => submitJob("posted")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] bg-gradient-to-r from-[#51218F] to-black text-white font-['Montserrat'] font-bold text-[14px] shadow-md hover:opacity-90">
+                {jobId ? "Update Job" : "Post job now"}
+              </button>
+              <button onClick={() => submitJob("draft")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] !border !border-[rgba(38,50,56,1)] bg-white text-[rgba(38,50,56,1)] font-['Montserrat'] font-bold text-[14px] hover:bg-gray-50">
+                {jobId ? "Save as Draft" : "Save as draft"}
+              </button>
             </div>
           </div>
 
@@ -330,8 +492,12 @@ export default function Created() {
           <div className="block lg:hidden w-full h-[1px] bg-[rgba(0,0,0,0.1)] my-6"></div>
 
           <div className="flex flex-col gap-4 lg:pt-4 mt-2">
-            <button onClick={() => submitJob("posted")} className="w-full sm:w-[190px] h-[39px] cursor-pointer rounded-[100px] bg-gradient-to-r from-[#51218F] to-black text-white font-['Montserrat'] font-bold text-[14px] shadow-md hover:opacity-90 transition-opacity">Post job now</button>
-            <button onClick={() => submitJob("draft")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] !border !border-[rgba(38,50,56,1)] bg-white text-[rgba(38,50,56,1)] font-['Montserrat'] font-bold text-[14px] hover:bg-gray-50">Save as draft</button>
+            <button onClick={() => submitJob("posted")} className="w-full sm:w-[190px] h-[39px] cursor-pointer rounded-[100px] bg-gradient-to-r from-[#51218F] to-black text-white font-['Montserrat'] font-bold text-[14px] shadow-md hover:opacity-90 transition-opacity">
+              {jobId ? "Update Job" : "Post job now"}
+            </button>
+            <button onClick={() => submitJob("draft")} className="w-[190px] h-[39px] cursor-pointer rounded-[100px] !border !border-[rgba(38,50,56,1)] bg-white text-[rgba(38,50,56,1)] font-['Montserrat'] font-bold text-[14px] hover:bg-gray-50">
+              {jobId ? "Save as Draft" : "Save as draft"}
+            </button>
           </div>
         </div>
       </div>
